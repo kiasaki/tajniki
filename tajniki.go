@@ -1,4 +1,4 @@
-// Package tajniki loads encrypted secrets from a JSON file.
+// Package tajniki loads encrypted secrets from supplied JSON contents.
 package tajniki
 
 import (
@@ -8,22 +8,18 @@ import (
 	"github.com/kiasaki/tajniki/internal/secrets"
 )
 
-// Load reads and decrypts the configured secrets file.
+// Load decrypts the selected environment from contents.
 //
-// TAJNIKI_FILE sets the file path. The default is secrets/local.json.
-// TAJNIKI_SECRET sets the password.
-func Read() (map[string]string, error) {
-	return secrets.LoadFromEnvironment()
-}
-
-func Load() {
-	secrets, err := secrets.LoadFromEnvironment()
+// TAJNIKI_SECRET sets the password. ENV selects the environment and defaults
+// to local.
+func Load(contents []byte) {
+	values, err := secrets.Load(contents, os.Getenv("TAJNIKI_SECRET"), secrets.Environment())
 	if err != nil {
-		log.Printf("tajniki: error loading secrets: %v", err)
+		log.Println("tajniki: error loading secrets:", err)
 		os.Exit(1)
 		return
 	}
-	for k, v := range secrets {
+	for k, v := range values {
 		os.Setenv(k, v)
 	}
 }

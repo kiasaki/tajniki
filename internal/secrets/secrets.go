@@ -11,19 +11,24 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"golang.org/x/crypto/scrypt"
 )
 
 const (
-	defaultFile = "secrets/local.json"
-	saltSize    = 16
-	keySize     = 32
+	defaultFile        = "secrets.json"
+	defaultEnvironment = "local"
+	saltSize           = 16
+	keySize            = 32
 )
 
-func LoadFromEnvironment() (map[string]string, error) {
-	return Load(FilePath(), os.Getenv("TAJNIKI_SECRET"))
+var ErrEnvironmentNotFound = errors.New("secrets environment does not exist")
+
+func Environment() string {
+	if environment := os.Getenv("ENV"); environment != "" {
+		return environment
+	}
+	return defaultEnvironment
 }
 
 func FilePath() string {
@@ -33,15 +38,15 @@ func FilePath() string {
 	return defaultFile
 }
 
-func Load(path, password string) (map[string]string, error) {
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read secrets file: %w", err)
+func Load(contents []byte, password, environment string) (map[string]string, error) {
+	var encryptedGroups map[string]map[string]string
+	if err := json.Unmarshal(contents, &encryptedGroups); err != nil {
+		return nil, fmt.Errorf("read secrets JSON: %w", err)
 	}
 
-	var encrypted map[string]string
-	if err := json.Unmarshal(contents, &encrypted); err != nil {
-		return nil, fmt.Errorf("read secrets JSON: %w", err)
+	encrypted, ok := encryptedGroups[environment]
+	if !ok || encrypted == nil {
+		return nil, fmt.Errorf("%w: %q", ErrEnvironmentNotFound, environment)
 	}
 
 	values := make(map[string]string, len(encrypted))
@@ -55,46 +60,32 @@ func Load(path, password string) (map[string]string, error) {
 	return values, nil
 }
 
-func Save(path, password string, values map[string]string) error {
+func Save(contents []byte, password, environment string, values map[string]string) ([]byte, error) {
+	encryptedGroups := make(map[string]map[string]string)
+	if len(contents) != 0 {
+		if err := json.Unmarshal(contents, &encryptedGroups); err != nil {
+			return nil, fmt.Errorf("read secrets JSON: %w", err)
+		}
+		if encryptedGroups == nil {
+			return nil, errors.New("secrets JSON must be an object")
+		}
+	}
+
 	encrypted := make(map[string]string, len(values))
 	for key, value := range values {
 		ciphertext, err := encrypt(value, password)
 		if err != nil {
-			return fmt.Errorf("encrypt %q: %w", key, err)
+			return nil, fmt.Errorf("encrypt %q: %w", key, err)
 		}
 		encrypted[key] = ciphertext
 	}
+	encryptedGroups[environment] = encrypted
 
-	contents, err := json.MarshalIndent(encrypted, "", "  ")
+	updated, err := json.MarshalIndent(encryptedGroups, "", "  ")
 	if err != nil {
-		return fmt.Errorf("create secrets JSON: %w", err)
+		return nil, fmt.Errorf("create secrets JSON: %w", err)
 	}
-	contents = append(contents, '\n')
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create secrets directory: %w", err)
-	}
-
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".tajniki-*")
-	if err != nil {
-		return fmt.Errorf("create temporary secrets file: %w", err)
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
-		return fmt.Errorf("set temporary file permissions: %w", err)
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		temporary.Close()
-		return fmt.Errorf("write temporary secrets file: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close temporary secrets file: %w", err)
-	}
-	if err := os.Rename(temporaryName, path); err != nil {
-		return fmt.Errorf("replace secrets file: %w", err)
-	}
-	return nil
+	return append(updated, '\n'), nil
 }
 
 func encrypt(value, password string) (string, error) {

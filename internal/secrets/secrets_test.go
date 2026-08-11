@@ -1,23 +1,22 @@
 package secrets
 
 import (
-	"os"
-	"path/filepath"
+	"errors"
 	"testing"
 )
 
 func TestSaveAndLoad(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "secrets", "local.json")
 	want := map[string]string{
 		"DATABASE_PASSWORD": "a secret value",
 		"EMPTY":             "",
 	}
 
-	if err := Save(path, "password", want); err != nil {
+	contents, err := Save(nil, "password", "local", want)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := Load(path, "password")
+	got, err := Load(contents, "password", "local")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,23 +28,57 @@ func TestSaveAndLoad(t *testing.T) {
 			t.Errorf("got %q for %q, want %q", got[key], key, value)
 		}
 	}
+}
 
-	info, err := os.Stat(path)
+func TestSavePreservesOtherEnvironments(t *testing.T) {
+	contents, err := Save(nil, "password", "local", map[string]string{"PORT": "1234"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("got file mode %o, want 600", info.Mode().Perm())
+	contents, err = Save(contents, "password", "production", map[string]string{"PORT": "443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for environment, want := range map[string]string{"local": "1234", "production": "443"} {
+		values, err := Load(contents, "password", environment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := values["PORT"]; got != want {
+			t.Errorf("%s PORT = %q, want %q", environment, got, want)
+		}
 	}
 }
 
 func TestLoadRejectsWrongPassword(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "local.json")
-	if err := Save(path, "password", map[string]string{"KEY": "value"}); err != nil {
+	contents, err := Save(nil, "password", "local", map[string]string{"KEY": "value"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, "wrong password"); err == nil {
+	if _, err := Load(contents, "wrong password", "local"); err == nil {
 		t.Fatal("Load did not return an error")
+	}
+}
+
+func TestLoadRejectsUnknownEnvironment(t *testing.T) {
+	contents, err := Save(nil, "password", "local", map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(contents, "password", "production"); !errors.Is(err, ErrEnvironmentNotFound) {
+		t.Fatalf("got %v, want ErrEnvironmentNotFound", err)
+	}
+}
+
+func TestEnvironment(t *testing.T) {
+	t.Setenv("ENV", "production")
+	if got := Environment(); got != "production" {
+		t.Errorf("got %q, want production", got)
+	}
+	t.Setenv("ENV", "")
+	if got := Environment(); got != "local" {
+		t.Errorf("got %q, want local", got)
 	}
 }
 
@@ -55,7 +88,7 @@ func TestFilePath(t *testing.T) {
 		t.Errorf("got %q, want custom.json", got)
 	}
 	t.Setenv("TAJNIKI_FILE", "")
-	if got := FilePath(); got != "secrets/local.json" {
-		t.Errorf("got %q, want secrets/local.json", got)
+	if got := FilePath(); got != "secrets.json" {
+		t.Errorf("got %q, want secrets.json", got)
 	}
 }

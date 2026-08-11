@@ -25,15 +25,16 @@ func run(args []string) error {
 		return errors.New("use: tajniki <list|get|set|edit>")
 	}
 
-	path := secrets.FilePath()
+	path := filepath.Clean(secrets.FilePath())
 	password := os.Getenv("TAJNIKI_SECRET")
+	environment := secrets.Environment()
 
 	switch args[0] {
 	case "list":
 		if len(args) != 1 {
 			return errors.New("use: tajniki list")
 		}
-		values, err := secrets.Load(path, password)
+		values, err := load(path, password, environment)
 		if err != nil {
 			return err
 		}
@@ -51,7 +52,7 @@ func run(args []string) error {
 		if len(args) != 2 {
 			return errors.New("use: tajniki get KEY")
 		}
-		values, err := secrets.Load(path, password)
+		values, err := load(path, password, environment)
 		if err != nil {
 			return err
 		}
@@ -66,34 +67,49 @@ func run(args []string) error {
 		if len(args) != 3 {
 			return errors.New("use: tajniki set KEY VALUE")
 		}
-		values, err := loadOrEmpty(path, password)
+		contents, values, err := loadOrEmpty(path, password, environment)
 		if err != nil {
 			return err
 		}
 		values[args[1]] = args[2]
-		return secrets.Save(path, password, values)
+		return save(path, contents, password, environment, values)
 
 	case "edit":
 		if len(args) != 1 {
 			return errors.New("use: tajniki edit")
 		}
-		return edit(path, password)
+		return edit(path, password, environment)
 
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
-func loadOrEmpty(path, password string) (map[string]string, error) {
-	values, err := secrets.Load(path, password)
-	if errors.Is(err, os.ErrNotExist) {
-		return make(map[string]string), nil
+func load(path, password, environment string) (map[string]string, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read secrets file: %w", err)
 	}
-	return values, err
+	return secrets.Load(contents, password, environment)
 }
 
-func edit(path, password string) error {
-	values, err := loadOrEmpty(path, password)
+func loadOrEmpty(path, password, environment string) ([]byte, map[string]string, error) {
+	contents, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, make(map[string]string), nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read secrets file: %w", err)
+	}
+	values, err := secrets.Load(contents, password, environment)
+	if errors.Is(err, secrets.ErrEnvironmentNotFound) {
+		return contents, make(map[string]string), nil
+	}
+	return contents, values, err
+}
+
+func edit(path, password, environment string) error {
+	storedContents, values, err := loadOrEmpty(path, password, environment)
 	if err != nil {
 		return err
 	}
@@ -144,5 +160,39 @@ func edit(path, password string) error {
 	if values == nil {
 		return errors.New("edited JSON must be an object")
 	}
-	return secrets.Save(filepath.Clean(path), password, values)
+	return save(path, storedContents, password, environment, values)
+}
+
+func save(path string, contents []byte, password, environment string, values map[string]string) error {
+	updated, err := secrets.Save(contents, password, environment, values)
+	if err != nil {
+		return err
+	}
+
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return fmt.Errorf("create secrets directory: %w", err)
+	}
+
+	temporary, err := os.CreateTemp(directory, ".tajniki-*")
+	if err != nil {
+		return fmt.Errorf("create temporary secrets file: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0600); err != nil {
+		temporary.Close()
+		return fmt.Errorf("set temporary file permissions: %w", err)
+	}
+	if _, err := temporary.Write(updated); err != nil {
+		temporary.Close()
+		return fmt.Errorf("write temporary secrets file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary secrets file: %w", err)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return fmt.Errorf("replace secrets file: %w", err)
+	}
+	return nil
 }
